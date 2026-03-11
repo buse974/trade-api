@@ -1,4 +1,4 @@
-import EventSource from 'eventsource';
+import { EventSource } from 'eventsource';
 
 // SOL/USDC pool on Raydium (most liquid)
 const DEXPAPRIKA_SSE_URL = 'https://api.dexpaprika.com/sse/pools';
