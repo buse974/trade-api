@@ -15,6 +15,7 @@
   "dependencies": {
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
+    "eventsource": "^4.1.0",
     "express": "^5.2.1",
     "pg": "^8.20.0",
     "swagger-ui-express": "^5.0.1",
