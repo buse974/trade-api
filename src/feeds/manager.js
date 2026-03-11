@@ -15,9 +15,9 @@ class FeedManager {
       for (const [symbol, data] of Object.entries(prices)) {
         this.updatePrice(symbol, data);
       }
-    }, 15000);
+    }, 30000);
 
-    console.log('Feed manager started (CoinGecko polling 15s)');
+    console.log('Feed manager started (CoinGecko polling 30s)');
   }
 
   updatePrice(symbol, data) {

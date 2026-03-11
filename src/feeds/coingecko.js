@@ -3,9 +3,6 @@ const COINS = {
   ethereum: 'ETH',
   solana: 'SOL',
   dogecoin: 'DOGE',
-  shiba_inu: 'SHIB',
-  jupiter_exchange_solana: 'JUP',
-  dogwifcoin: 'WIF',
   pepe: 'PEPE'
 };
 
