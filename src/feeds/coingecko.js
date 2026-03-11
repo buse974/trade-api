@@ -16,10 +16,13 @@ class CoinGeckoFeed {
     this.prices = {};
     this.interval = null;
     this.onUpdate = null;
+    this.backoffMs = 0;
+    this.consecutiveErrors = 0;
   }
 
-  start(onUpdate, intervalMs = 10000) {
+  start(onUpdate, intervalMs = 15000) {
     this.onUpdate = onUpdate;
+    this.baseInterval = intervalMs;
     this.poll();
     this.interval = setInterval(() => this.poll(), intervalMs);
     console.log(`CoinGecko feed started (polling every ${intervalMs / 1000}s)`);
@@ -33,15 +36,27 @@ class CoinGeckoFeed {
   }
 
   async poll() {
+    if (this.backoffMs > 0) {
+      this.backoffMs -= this.baseInterval;
+      return;
+    }
     try {
       const ids = Object.keys(COINS).join(',');
       const url = `${API_URL}?ids=${ids}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true`;
       const res = await fetch(url);
 
       if (!res.ok) {
-        console.error(`CoinGecko HTTP ${res.status}`);
+        this.consecutiveErrors++;
+        if (res.status === 429) {
+          this.backoffMs = Math.min(60000, (this.consecutiveErrors * 15000));
+          console.warn(`CoinGecko rate limited, backing off ${this.backoffMs / 1000}s`);
+        } else {
+          console.error(`CoinGecko HTTP ${res.status}`);
+        }
         return;
       }
+      this.consecutiveErrors = 0;
+      this.backoffMs = 0;
 
       const data = await res.json();
       const now = Date.now();
