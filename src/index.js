@@ -152,39 +152,38 @@ app.get('/api/history/:symbol', async (req, res) => {
 });
 
 // --- Derivatives calculation ---
-function linearRegression(values) {
-  const n = values.length;
+function slopeOverWindow(prices, end, win) {
+  const start = Math.max(0, end - win);
+  const n = end - start;
   if (n < 2) return 0;
+  // Linear regression slope using only indices
   let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
   for (let i = 0; i < n; i++) {
+    const y = prices[start + i];
     sumX += i;
-    sumY += values[i];
-    sumXY += i * values[i];
+    sumY += y;
+    sumXY += i * y;
     sumX2 += i * i;
   }
   return (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
 }
 
-function getMarketState(prices, window = 60) {
-  if (prices.length < window * 2) return { d1: 0, d2: 0, profile: 'bullish' };
+function getMarketState(prices, idx, win, prevSlopes) {
+  if (idx < win) return { d1: 0, d2: 0, profile: 'bullish' };
 
-  // D1: slope of prices over the window
-  const recentPrices = prices.slice(-window);
-  const d1 = linearRegression(recentPrices);
+  const d1 = slopeOverWindow(prices, idx, win);
+  prevSlopes.push(d1);
 
-  // D2: rate of change of D1 (slope of slopes)
-  const halfWindow = Math.floor(window / 2);
-  const slopeHistory = [];
-  for (let i = halfWindow; i <= prices.length; i++) {
-    slopeHistory.push(linearRegression(prices.slice(Math.max(0, i - halfWindow), i)));
-  }
-  const d2 = linearRegression(slopeHistory.slice(-halfWindow));
+  const halfWin = Math.floor(win / 2);
+  const d2 = prevSlopes.length >= halfWin
+    ? slopeOverWindow(prevSlopes, prevSlopes.length, halfWin)
+    : 0;
 
   let profile;
-  if (d1 > 0 && d2 > 0) profile = 'bullish';       // trending up, accelerating
-  else if (d1 > 0 && d2 <= 0) profile = 'exhaustion'; // trending up, decelerating
-  else if (d1 <= 0 && d2 <= 0) profile = 'bearish';   // trending down, accelerating
-  else profile = 'reversal';                           // trending down, decelerating (D1<0, D2>0)
+  if (d1 > 0 && d2 > 0) profile = 'bullish';
+  else if (d1 > 0 && d2 <= 0) profile = 'exhaustion';
+  else if (d1 <= 0 && d2 <= 0) profile = 'bearish';
+  else profile = 'reversal';
 
   return { d1, d2, profile };
 }
@@ -252,6 +251,8 @@ app.post('/api/backtest', async (req, res) => {
     let peakValue = capital;
     let maxDrawdown = 0;
     const closePrices = [];
+    const slopeHistory = [];
+    let currentState = { d1: 0, d2: 0, profile: 'bullish' };
 
     for (let i = 0; i < result.rows.length; i++) {
       const row = result.rows[i];
@@ -264,10 +265,13 @@ app.post('/api/backtest', async (req, res) => {
       // Only trade during the actual month (warmup period is just for derivative calculation)
       if (i < monthStartIdx) continue;
 
-      // Calculate market state
-      const state = getMarketState(closePrices, window);
-      const activeProfile = p[state.profile];
+      // Recalculate market state every 5 minutes
       const inMonth = i - monthStartIdx;
+      if (inMonth % 5 === 0) {
+        currentState = getMarketState(closePrices, closePrices.length, window, slopeHistory);
+      }
+      const state = currentState;
+      const activeProfile = p[state.profile];
 
       if (position) {
         if (!activeProfile.enabled) {
