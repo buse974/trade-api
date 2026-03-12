@@ -144,6 +144,142 @@ app.get('/api/history/:symbol', async (req, res) => {
   }
 });
 
+// --- Backtest ---
+app.post('/api/backtest', async (req, res) => {
+  const {
+    symbol = 'SOL',
+    month,          // "2025-01"
+    capital = 100,
+    stopLoss = 5,
+    takeProfit = 10,
+    positionSize = 100,  // % du capital à investir
+  } = req.body;
+
+  if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+    return res.status(400).json({ error: 'month required (format: 2025-01)' });
+  }
+
+  const pair = symbol.toUpperCase() + 'USDT';
+  const startDate = `${month}-01`;
+  const [y, m] = month.split('-').map(Number);
+  const endDate = new Date(y, m, 0); // last day of month
+
+  try {
+    const result = await db.query(`
+      SELECT time, open, high, low, close
+      FROM prices
+      WHERE symbol = $1 AND time >= $2 AND time < ($3::date + interval '1 day')
+      ORDER BY time
+    `, [pair, startDate, endDate.toISOString().slice(0, 10)]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'No data for this period' });
+    }
+
+    // Simulate
+    let cash = capital;
+    let position = null; // { qty, entryPrice, entryTime }
+    const trades = [];
+    const capitalHistory = [];
+    let peakValue = capital;
+    let maxDrawdown = 0;
+
+    for (const row of result.rows) {
+      const price = parseFloat(row.close);
+      const high = parseFloat(row.high);
+      const low = parseFloat(row.low);
+      const time = new Date(row.time).getTime();
+
+      if (position) {
+        // Check stop loss on low
+        const slPrice = position.entryPrice * (1 - stopLoss / 100);
+        if (low <= slPrice) {
+          const sellPrice = slPrice;
+          const amount = position.qty * sellPrice;
+          const pnl = amount - (position.qty * position.entryPrice);
+          cash += amount;
+          trades.push({ type: 'SELL', price: sellPrice, qty: position.qty, pnl, reason: 'stop_loss', time });
+          position = null;
+        }
+        // Check take profit on high
+        else {
+          const tpPrice = position.entryPrice * (1 + takeProfit / 100);
+          if (high >= tpPrice) {
+            const sellPrice = tpPrice;
+            const amount = position.qty * sellPrice;
+            const pnl = amount - (position.qty * position.entryPrice);
+            cash += amount;
+            trades.push({ type: 'SELL', price: sellPrice, qty: position.qty, pnl, reason: 'take_profit', time });
+            position = null;
+          }
+        }
+      }
+
+      // If no position, buy
+      if (!position && cash > 1) {
+        const investAmount = cash * (positionSize / 100);
+        const qty = investAmount / price;
+        cash -= investAmount;
+        position = { qty, entryPrice: price, entryTime: time };
+        trades.push({ type: 'BUY', price, qty, time });
+      }
+
+      // Track capital
+      const totalValue = cash + (position ? position.qty * price : 0);
+      if (totalValue > peakValue) peakValue = totalValue;
+      const dd = ((peakValue - totalValue) / peakValue) * 100;
+      if (dd > maxDrawdown) maxDrawdown = dd;
+
+      // Sample capital every 60 rows (~1h) to keep response small
+      if (capitalHistory.length === 0 || result.rows.indexOf(row) % 60 === 0) {
+        capitalHistory.push({ time: Math.floor(time / 1000), value: totalValue });
+      }
+    }
+
+    // Close position at end of month
+    if (position) {
+      const lastPrice = parseFloat(result.rows[result.rows.length - 1].close);
+      const amount = position.qty * lastPrice;
+      const pnl = amount - (position.qty * position.entryPrice);
+      cash += amount;
+      trades.push({ type: 'SELL', price: lastPrice, qty: position.qty, pnl, reason: 'end_of_period', time: new Date(result.rows[result.rows.length - 1].time).getTime() });
+      position = null;
+    }
+
+    const finalValue = cash;
+    const totalPnl = finalValue - capital;
+    const wins = trades.filter(t => t.type === 'SELL' && t.pnl > 0).length;
+    const losses = trades.filter(t => t.type === 'SELL' && t.pnl <= 0).length;
+
+    // Add final point
+    capitalHistory.push({ time: capitalHistory[capitalHistory.length - 1]?.time, value: finalValue });
+
+    res.json({
+      symbol,
+      month,
+      capital,
+      finalValue,
+      pnl: totalPnl,
+      pnlPercent: (totalPnl / capital) * 100,
+      trades,
+      capitalHistory,
+      metrics: {
+        totalTrades: trades.filter(t => t.type === 'SELL').length,
+        wins,
+        losses,
+        winRate: wins + losses > 0 ? (wins / (wins + losses)) * 100 : 0,
+        maxDrawdown,
+        bestTrade: Math.max(...trades.filter(t => t.pnl !== undefined).map(t => t.pnl), 0),
+        worstTrade: Math.min(...trades.filter(t => t.pnl !== undefined).map(t => t.pnl), 0),
+      },
+      dataPoints: result.rows.length,
+    });
+  } catch (err) {
+    console.error('Backtest error:', err.message);
+    res.status(500).json({ error: 'Backtest failed' });
+  }
+});
+
 // --- WebSocket ---
 const wss = new WebSocketServer({ server, path: '/ws' });
 
