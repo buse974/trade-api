@@ -8,6 +8,7 @@ import FeedManager from './feeds/manager.js';
 import Portfolio from './simulation/portfolio.js';
 import TradingEngine from './simulation/engine.js';
 import { calculateCorrelationMatrix } from './utils/correlation.js';
+import db from './db.js';
 
 dotenv.config();
 
@@ -98,6 +99,49 @@ app.post('/api/config', (req, res) => {
 app.post('/api/portfolio/reset', (req, res) => {
   portfolio.reset();
   res.json(portfolio.getState());
+});
+
+// --- Historical prices from DB ---
+app.get('/api/history/:symbol', async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase() + 'USDT';
+  const range = req.query.range || '7d'; // 1d, 7d, 30d, 90d, 1y, all
+  const intervals = {
+    '1d': { interval: '1 minute', since: '1 day' },
+    '7d': { interval: '15 minutes', since: '7 days' },
+    '30d': { interval: '1 hour', since: '30 days' },
+    '90d': { interval: '4 hours', since: '90 days' },
+    '1y': { interval: '1 day', since: '365 days' },
+    'all': { interval: '1 day', since: '100 years' },
+  };
+  const cfg = intervals[range] || intervals['7d'];
+
+  try {
+    const result = await db.query(`
+      SELECT
+        date_trunc($1, time) as time,
+        (array_agg(open ORDER BY time))[1] as open,
+        MAX(high) as high,
+        MIN(low) as low,
+        (array_agg(close ORDER BY time DESC))[1] as close,
+        SUM(volume) as volume
+      FROM prices
+      WHERE symbol = $2 AND time >= NOW() - $3::interval
+      GROUP BY date_trunc($1, time)
+      ORDER BY time
+    `, [cfg.interval, symbol, cfg.since]);
+
+    res.json(result.rows.map(r => ({
+      time: Math.floor(new Date(r.time).getTime() / 1000),
+      open: parseFloat(r.open),
+      high: parseFloat(r.high),
+      low: parseFloat(r.low),
+      close: parseFloat(r.close),
+      volume: parseFloat(r.volume),
+    })));
+  } catch (err) {
+    console.error('History error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch history' });
+  }
 });
 
 // --- WebSocket ---
