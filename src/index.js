@@ -151,95 +151,174 @@ app.get('/api/history/:symbol', async (req, res) => {
   }
 });
 
+// --- Derivatives calculation ---
+function linearRegression(values) {
+  const n = values.length;
+  if (n < 2) return 0;
+  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+  for (let i = 0; i < n; i++) {
+    sumX += i;
+    sumY += values[i];
+    sumXY += i * values[i];
+    sumX2 += i * i;
+  }
+  return (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+}
+
+function getMarketState(prices, window = 60) {
+  if (prices.length < window * 2) return { d1: 0, d2: 0, profile: 'bullish' };
+
+  // D1: slope of prices over the window
+  const recentPrices = prices.slice(-window);
+  const d1 = linearRegression(recentPrices);
+
+  // D2: rate of change of D1 (slope of slopes)
+  const halfWindow = Math.floor(window / 2);
+  const slopeHistory = [];
+  for (let i = halfWindow; i <= prices.length; i++) {
+    slopeHistory.push(linearRegression(prices.slice(Math.max(0, i - halfWindow), i)));
+  }
+  const d2 = linearRegression(slopeHistory.slice(-halfWindow));
+
+  let profile;
+  if (d1 > 0 && d2 > 0) profile = 'bullish';       // trending up, accelerating
+  else if (d1 > 0 && d2 <= 0) profile = 'exhaustion'; // trending up, decelerating
+  else if (d1 <= 0 && d2 <= 0) profile = 'bearish';   // trending down, accelerating
+  else profile = 'reversal';                           // trending down, decelerating (D1<0, D2>0)
+
+  return { d1, d2, profile };
+}
+
 // --- Backtest ---
 app.post('/api/backtest', async (req, res) => {
   const {
     symbol = 'SOL',
-    month,          // "2025-01"
+    month,
     capital = 100,
+    window = 60,        // derivative calculation window (minutes)
+    profiles = null,     // { bullish, exhaustion, bearish, reversal } each with { stopLoss, takeProfit, positionSize, enabled }
+    // Fallback: simple mode with single set of params
     stopLoss = 5,
     takeProfit = 10,
-    positionSize = 100,  // % du capital à investir
+    positionSize = 100,
   } = req.body;
 
   if (!month || !/^\d{4}-\d{2}$/.test(month)) {
     return res.status(400).json({ error: 'month required (format: 2025-01)' });
   }
 
+  // Build profiles: either from request or single-mode fallback
+  const defaultProfile = { stopLoss, takeProfit, positionSize, enabled: true };
+  const p = profiles || {
+    bullish: { ...defaultProfile },
+    exhaustion: { ...defaultProfile },
+    bearish: { stopLoss: 0, takeProfit: 0, positionSize: 0, enabled: false },
+    reversal: { ...defaultProfile },
+  };
+
   const pair = symbol.toUpperCase() + 'USDT';
   const startDate = `${month}-01`;
   const [y, m] = month.split('-').map(Number);
-  const endDate = new Date(y, m, 0); // last day of month
+  const endDate = new Date(y, m, 0);
 
   try {
+    // Fetch extra data before the month for derivative warmup
+    const warmupDate = new Date(y, m - 1, 1);
+    warmupDate.setDate(warmupDate.getDate() - window * 2);
+
     const result = await db.query(`
       SELECT time, open, high, low, close
       FROM prices
       WHERE symbol = $1 AND time >= $2 AND time < ($3::date + interval '1 day')
       ORDER BY time
-    `, [pair, startDate, endDate.toISOString().slice(0, 10)]);
+    `, [pair, warmupDate.toISOString().slice(0, 10), endDate.toISOString().slice(0, 10)]);
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'No data for this period' });
     }
 
-    // Simulate
+    // Find index where the actual month starts
+    const monthStart = new Date(`${month}-01T00:00:00Z`).getTime();
+    const monthStartIdx = result.rows.findIndex(r => new Date(r.time).getTime() >= monthStart);
+    if (monthStartIdx === -1) {
+      return res.status(404).json({ error: 'No data for this month' });
+    }
+
     let cash = capital;
-    let position = null; // { qty, entryPrice, entryTime }
+    let position = null;
     const trades = [];
     const capitalHistory = [];
+    const profileHistory = [];
     let peakValue = capital;
     let maxDrawdown = 0;
+    const closePrices = [];
 
-    for (const row of result.rows) {
+    for (let i = 0; i < result.rows.length; i++) {
+      const row = result.rows[i];
       const price = parseFloat(row.close);
       const high = parseFloat(row.high);
       const low = parseFloat(row.low);
       const time = new Date(row.time).getTime();
+      closePrices.push(price);
+
+      // Only trade during the actual month (warmup period is just for derivative calculation)
+      if (i < monthStartIdx) continue;
+
+      // Calculate market state
+      const state = getMarketState(closePrices, window);
+      const activeProfile = p[state.profile];
+      const inMonth = i - monthStartIdx;
 
       if (position) {
-        // Check stop loss on low
-        const slPrice = position.entryPrice * (1 - stopLoss / 100);
-        if (low <= slPrice) {
-          const sellPrice = slPrice;
-          const amount = position.qty * sellPrice;
+        if (!activeProfile.enabled) {
+          // Profile says sell everything
+          const amount = position.qty * price;
           const pnl = amount - (position.qty * position.entryPrice);
           cash += amount;
-          trades.push({ type: 'SELL', price: sellPrice, qty: position.qty, pnl, reason: 'stop_loss', time });
+          trades.push({ type: 'SELL', price, qty: position.qty, pnl, reason: 'profile_exit', profile: state.profile, time });
           position = null;
-        }
-        // Check take profit on high
-        else {
-          const tpPrice = position.entryPrice * (1 + takeProfit / 100);
-          if (high >= tpPrice) {
-            const sellPrice = tpPrice;
-            const amount = position.qty * sellPrice;
+        } else {
+          // Check stop loss on low
+          const slPrice = position.entryPrice * (1 - activeProfile.stopLoss / 100);
+          if (low <= slPrice) {
+            const amount = position.qty * slPrice;
             const pnl = amount - (position.qty * position.entryPrice);
             cash += amount;
-            trades.push({ type: 'SELL', price: sellPrice, qty: position.qty, pnl, reason: 'take_profit', time });
+            trades.push({ type: 'SELL', price: slPrice, qty: position.qty, pnl, reason: 'stop_loss', profile: state.profile, time });
             position = null;
+          }
+          // Check take profit on high
+          else {
+            const tpPrice = position.entryPrice * (1 + activeProfile.takeProfit / 100);
+            if (high >= tpPrice) {
+              const amount = position.qty * tpPrice;
+              const pnl = amount - (position.qty * position.entryPrice);
+              cash += amount;
+              trades.push({ type: 'SELL', price: tpPrice, qty: position.qty, pnl, reason: 'take_profit', profile: state.profile, time });
+              position = null;
+            }
           }
         }
       }
 
-      // If no position, buy
-      if (!position && cash > 1) {
-        const investAmount = cash * (positionSize / 100);
+      // Buy if no position and profile allows it
+      if (!position && cash > 1 && activeProfile.enabled && activeProfile.positionSize > 0) {
+        const investAmount = cash * (activeProfile.positionSize / 100);
         const qty = investAmount / price;
         cash -= investAmount;
         position = { qty, entryPrice: price, entryTime: time };
-        trades.push({ type: 'BUY', price, qty, time });
+        trades.push({ type: 'BUY', price, qty, profile: state.profile, time });
       }
 
-      // Track capital
       const totalValue = cash + (position ? position.qty * price : 0);
       if (totalValue > peakValue) peakValue = totalValue;
       const dd = ((peakValue - totalValue) / peakValue) * 100;
       if (dd > maxDrawdown) maxDrawdown = dd;
 
-      // Sample capital every 60 rows (~1h) to keep response small
-      if (capitalHistory.length === 0 || result.rows.indexOf(row) % 60 === 0) {
-        capitalHistory.push({ time: Math.floor(time / 1000), value: totalValue });
+      // Sample every 60 rows (~1h)
+      if (inMonth % 60 === 0) {
+        capitalHistory.push({ time: Math.floor(time / 1000), value: totalValue, profile: state.profile });
+        profileHistory.push({ time: Math.floor(time / 1000), profile: state.profile, d1: state.d1, d2: state.d2 });
       }
     }
 
@@ -261,6 +340,11 @@ app.post('/api/backtest', async (req, res) => {
     // Add final point
     capitalHistory.push({ time: capitalHistory[capitalHistory.length - 1]?.time, value: finalValue });
 
+    // Profile distribution stats
+    const profileCounts = { bullish: 0, exhaustion: 0, bearish: 0, reversal: 0 };
+    for (const ph of profileHistory) profileCounts[ph.profile]++;
+    const totalSamples = profileHistory.length || 1;
+
     res.json({
       symbol,
       month,
@@ -270,6 +354,7 @@ app.post('/api/backtest', async (req, res) => {
       pnlPercent: (totalPnl / capital) * 100,
       trades,
       capitalHistory,
+      profileHistory,
       metrics: {
         totalTrades: trades.filter(t => t.type === 'SELL').length,
         wins,
@@ -278,8 +363,14 @@ app.post('/api/backtest', async (req, res) => {
         maxDrawdown,
         bestTrade: Math.max(...trades.filter(t => t.pnl !== undefined).map(t => t.pnl), 0),
         worstTrade: Math.min(...trades.filter(t => t.pnl !== undefined).map(t => t.pnl), 0),
+        profileDistribution: {
+          bullish: ((profileCounts.bullish / totalSamples) * 100).toFixed(0),
+          exhaustion: ((profileCounts.exhaustion / totalSamples) * 100).toFixed(0),
+          bearish: ((profileCounts.bearish / totalSamples) * 100).toFixed(0),
+          reversal: ((profileCounts.reversal / totalSamples) * 100).toFixed(0),
+        },
       },
-      dataPoints: result.rows.length,
+      dataPoints: result.rows.length - monthStartIdx,
     });
   } catch (err) {
     console.error('Backtest error:', err.message);
