@@ -106,29 +106,33 @@ app.get('/api/history/:symbol', async (req, res) => {
   const symbol = req.params.symbol.toUpperCase() + 'USDT';
   const range = req.query.range || '7d'; // 1d, 7d, 30d, 90d, 1y, all
   const intervals = {
-    '1d': { interval: '1 minute', since: '1 day' },
-    '7d': { interval: '15 minutes', since: '7 days' },
-    '30d': { interval: '1 hour', since: '30 days' },
-    '90d': { interval: '4 hours', since: '90 days' },
-    '1y': { interval: '1 day', since: '365 days' },
-    'all': { interval: '1 day', since: '100 years' },
+    '1d': { truncTo: 'minute', since: '1 day' },
+    '7d': { truncTo: 'hour', since: '7 days' },
+    '30d': { truncTo: 'hour', since: '30 days' },
+    '90d': { truncTo: 'hour', bucketSeconds: 14400, since: '90 days' },
+    '1y': { truncTo: 'day', since: '365 days' },
+    'all': { truncTo: 'day', since: '100 years' },
   };
   const cfg = intervals[range] || intervals['7d'];
 
   try {
+    const bucketExpr = cfg.bucketSeconds
+      ? `to_timestamp(floor(extract(epoch from time) / ${cfg.bucketSeconds}) * ${cfg.bucketSeconds})`
+      : `date_trunc('${cfg.truncTo}', time)`;
+
     const result = await db.query(`
       SELECT
-        date_trunc($1, time) as time,
+        ${bucketExpr} as time,
         (array_agg(open ORDER BY time))[1] as open,
         MAX(high) as high,
         MIN(low) as low,
         (array_agg(close ORDER BY time DESC))[1] as close,
         SUM(volume) as volume
       FROM prices
-      WHERE symbol = $2 AND time >= NOW() - $3::interval
-      GROUP BY date_trunc($1, time)
+      WHERE symbol = $1 AND time >= NOW() - $2::interval
+      GROUP BY ${bucketExpr}
       ORDER BY time
-    `, [cfg.interval, symbol, cfg.since]);
+    `, [symbol, cfg.since]);
 
     res.json(result.rows.map(r => ({
       time: Math.floor(new Date(r.time).getTime() / 1000),
