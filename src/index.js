@@ -134,14 +134,17 @@ app.get('/api/history/:symbol', async (req, res) => {
       ORDER BY time
     `, [symbol, cfg.since]);
 
-    res.json(result.rows.map(r => ({
-      time: Math.floor(new Date(r.time).getTime() / 1000),
-      open: parseFloat(r.open),
-      high: parseFloat(r.high),
-      low: parseFloat(r.low),
-      close: parseFloat(r.close),
-      volume: parseFloat(r.volume),
-    })));
+    const rows = result.rows
+      .map(r => ({
+        time: Math.floor(new Date(r.time).getTime() / 1000),
+        open: parseFloat(r.open),
+        high: parseFloat(r.high),
+        low: parseFloat(r.low),
+        close: parseFloat(r.close),
+        volume: parseFloat(r.volume),
+      }))
+      .filter(r => isFinite(r.open) && isFinite(r.close) && r.time > 0);
+    res.json(rows);
   } catch (err) {
     console.error('History error:', err.message);
     res.status(500).json({ error: 'Failed to fetch history' });
