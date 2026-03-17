@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Python dependencies
-RUN python3 -m pip install --break-system-packages xgboost psycopg2-binary numpy
+RUN python3 -m pip install --break-system-packages xgboost psycopg2-binary numpy scikit-learn
 
 # Node dependencies
 COPY package*.json ./
