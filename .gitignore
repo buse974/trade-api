@@ -6,5 +6,6 @@ dist/
 notebooks/data/
 notebooks/checkpoints/
 notebooks/train.log
-notebooks/models/*.json
-!notebooks/models/norm_stats.json
+# Ignore direction models (failed experiments), keep regime models
+notebooks/models/xgb_*.json
+notebooks/models/*_results.json
