@@ -104,8 +104,12 @@ class Regime {
   }
 
   _startRefresh(intervalMs) {
+    console.log(`[regime] Starting refresh cycle (interval: ${intervalMs}ms)`);
     // Initial prediction
-    setTimeout(() => this.refreshAll(), 2000);
+    setTimeout(() => {
+      console.log('[regime] Running initial prediction...');
+      this.refreshAll();
+    }, 2000);
 
     // Periodic refresh
     this.updateInterval = setInterval(() => {
@@ -117,10 +121,15 @@ class Regime {
    * Refresh predictions for all horizons.
    */
   async refreshAll() {
-    if (!this.ready) return;
+    if (!this.ready) {
+      console.log('[regime] Skipping refresh: not ready');
+      return;
+    }
 
     try {
+      console.log('[regime] Sending predict_all...');
       const result = await this._send({ action: 'predict_all' });
+      console.log('[regime] Prediction result:', JSON.stringify(result).slice(0, 200));
       if (result && !result.error) {
         this.allRegimes = result;
         // Use 15m as the primary regime
