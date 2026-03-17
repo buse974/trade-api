@@ -1,3 +1,10 @@
 node_modules/
 .env
 dist/
+
+# ML data & checkpoints (stored on GCS)
+notebooks/data/
+notebooks/checkpoints/
+notebooks/train.log
+notebooks/models/*.json
+!notebooks/models/norm_stats.json

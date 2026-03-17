@@ -98,9 +98,9 @@ async function main() {
     )
   `);
 
-  // Compute mean and std for each column
-  const avgExprs = featureCols.map(c => `AVG(${c}::double precision) AS "${c}_mean"`).join(', ');
-  const stdExprs = featureCols.map(c => `STDDEV(${c}::double precision) AS "${c}_std"`).join(', ');
+  // Compute mean and std for each column (NULLIF filters NaN which poisons AVG/STDDEV)
+  const avgExprs = featureCols.map(c => `AVG(NULLIF(${c}::double precision, 'NaN')) AS "${c}_mean"`).join(', ');
+  const stdExprs = featureCols.map(c => `STDDEV(NULLIF(${c}::double precision, 'NaN')) AS "${c}_std"`).join(', ');
 
   const normRes = await pool.query(`SELECT ${avgExprs}, ${stdExprs} FROM ${DATASET_TABLE}`);
   const normRow = normRes.rows[0];

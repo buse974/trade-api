@@ -7,6 +7,7 @@ import swaggerUi from 'swagger-ui-express';
 import FeedManager from './feeds/manager.js';
 import Portfolio from './simulation/portfolio.js';
 import TradingEngine from './simulation/engine.js';
+import Regime from './ml/regime.js';
 import { calculateCorrelationMatrix } from './utils/correlation.js';
 import db from './db.js';
 
@@ -20,6 +21,8 @@ const server = createServer(app);
 const feedManager = new FeedManager();
 const portfolio = new Portfolio(10000);
 const engine = new TradingEngine(portfolio);
+const regime = new Regime();
+engine.regime = regime;
 
 // --- Swagger ---
 const swaggerDocument = {
@@ -49,6 +52,9 @@ const swaggerDocument = {
     '/api/config': {
       get: { summary: 'Bot config', responses: { 200: { description: 'Config' } } },
       post: { summary: 'Update bot config', responses: { 200: { description: 'Updated' } } }
+    },
+    '/api/regime': {
+      get: { summary: 'Market regime prediction (calme/actif)', responses: { 200: { description: 'Regime' } } }
     }
   }
 };
@@ -99,6 +105,13 @@ app.post('/api/config', (req, res) => {
 app.post('/api/portfolio/reset', (req, res) => {
   portfolio.reset();
   res.json(portfolio.getState());
+});
+
+app.get('/api/regime', (req, res) => {
+  res.json({
+    current: regime.getRegime(),
+    all: regime.getAllRegimes(),
+  });
 });
 
 // --- Historical prices from DB ---
@@ -404,7 +417,8 @@ wss.on('connection', (ws) => {
       prices: feedManager.getPrices(),
       portfolio: portfolio.getState(feedManager.getPrices()),
       config: engine.getConfig(),
-      correlation: calculateCorrelationMatrix(feedManager.getAllHistory())
+      correlation: calculateCorrelationMatrix(feedManager.getAllHistory()),
+      regime: { current: regime.getRegime(), all: regime.getAllRegimes() },
     },
     timestamp: Date.now()
   }));
@@ -451,8 +465,18 @@ setInterval(() => {
   broadcast('portfolio', portfolio.getState(feedManager.getPrices()));
 }, 5000);
 
+// --- Regime ML updates ---
+regime.onUpdate((allRegimes) => {
+  broadcast('regime', { current: regime.getRegime(), all: allRegimes });
+});
+
 // --- Start ---
 feedManager.start();
+
+// Start regime prediction service (non-blocking, API works without it)
+regime.start(60000).catch(err => {
+  console.error(`[regime] Failed to start: ${err.message}. Trading without ML.`);
+});
 
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
