@@ -35,7 +35,7 @@ class Regime {
   async start(refreshMs = 60000) {
     const pythonCmd = process.env.PYTHON_CMD || 'python3';
 
-    return new Promise((resolve, reject) => {
+    await new Promise((resolve, reject) => {
       this.process = spawn(pythonCmd, [PREDICT_SCRIPT], {
         env: {
           ...process.env,
