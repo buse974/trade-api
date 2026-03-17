@@ -196,14 +196,14 @@ class Regime {
         reject(e);
       }
 
-      // Timeout after 5s
+      // Timeout after 30s (DB query can be slow on first call)
       setTimeout(() => {
         const idx = this.pendingCallbacks.indexOf(resolve);
         if (idx !== -1) {
           this.pendingCallbacks.splice(idx, 1);
           resolve({ regime: 'actif', proba: 0.5, stale: true, error: 'timeout' });
         }
-      }, 5000);
+      }, 30000);
     });
   }
 

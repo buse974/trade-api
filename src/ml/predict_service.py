@@ -120,21 +120,25 @@ def get_latest_features():
         cur = conn.cursor()
 
         # Get the latest time that has data for all 5 symbols
+        # Uses INTERSECT on per-symbol MAX(time) to leverage the index (16ms vs 23s)
         cur.execute("""
-            SELECT f.time,
-                   f.symbol, f.d1_short, f.d2_short, f.d1_mid, f.d2_mid,
+            WITH latest_per_symbol AS (
+                (SELECT MAX(time) as t FROM features WHERE symbol = 'SOLUSDT')
+                INTERSECT
+                (SELECT MAX(time) as t FROM features WHERE symbol = 'BTCUSDT')
+                INTERSECT
+                (SELECT MAX(time) as t FROM features WHERE symbol = 'ETHUSDT')
+                INTERSECT
+                (SELECT MAX(time) as t FROM features WHERE symbol = 'DOGEUSDT')
+                INTERSECT
+                (SELECT MAX(time) as t FROM features WHERE symbol = 'SHIBUSDT')
+            )
+            SELECT f.time, f.symbol, f.d1_short, f.d2_short, f.d1_mid, f.d2_mid,
                    f.d1_long, f.d2_long, f.rsi, f.macd, f.macd_signal,
                    f.bollinger_upper, f.bollinger_lower, f.atr,
                    f.ma_deviation, f.integral_deviation
-            FROM features f
-            WHERE f.time = (
-                SELECT MAX(f1.time) FROM features f1
-                WHERE f1.symbol = 'SOLUSDT'
-                AND EXISTS (SELECT 1 FROM features f2 WHERE f2.time = f1.time AND f2.symbol = 'BTCUSDT')
-                AND EXISTS (SELECT 1 FROM features f3 WHERE f3.time = f1.time AND f3.symbol = 'ETHUSDT')
-                AND EXISTS (SELECT 1 FROM features f4 WHERE f4.time = f1.time AND f4.symbol = 'DOGEUSDT')
-                AND EXISTS (SELECT 1 FROM features f5 WHERE f5.time = f1.time AND f5.symbol = 'SHIBUSDT')
-            )
+            FROM features f, latest_per_symbol l
+            WHERE f.time = l.t
             AND f.symbol IN ('SOLUSDT', 'BTCUSDT', 'ETHUSDT', 'DOGEUSDT', 'SHIBUSDT')
         """)
         rows = cur.fetchall()
