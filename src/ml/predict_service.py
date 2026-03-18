@@ -205,6 +205,88 @@ def normalize(vector):
     return normalized
 
 
+def get_features_range(start_date, end_date):
+    """
+    Query features for a date range, sampled every 5 minutes (matching backtest candles).
+    Returns list of (timestamp, feature_vector) tuples.
+    """
+    try:
+        conn = connect_db()
+        cur = conn.cursor()
+
+        # Get all distinct timestamps in range that have all 5 symbols
+        cur.execute("""
+            SELECT f.time, f.symbol, f.d1_short, f.d2_short, f.d1_mid, f.d2_mid,
+                   f.d1_long, f.d2_long, f.rsi, f.macd, f.macd_signal,
+                   f.bollinger_upper, f.bollinger_lower, f.atr,
+                   f.ma_deviation, f.integral_deviation
+            FROM features f
+            WHERE f.time >= %s AND f.time < %s
+            AND f.symbol IN ('SOLUSDT', 'BTCUSDT', 'ETHUSDT', 'DOGEUSDT', 'SHIBUSDT')
+            ORDER BY f.time
+        """, (start_date, end_date))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        # Group by timestamp
+        by_time = {}
+        for row in rows:
+            t = str(row[0])
+            symbol = row[1]
+            features = [float(v) if v is not None else 0.0 for v in row[2:]]
+            if t not in by_time:
+                by_time[t] = {}
+            by_time[t][symbol] = features
+
+        # Build feature vectors for timestamps that have all 5 symbols
+        result = []
+        for t, symbols_data in by_time.items():
+            if len(symbols_data) < 5:
+                continue
+            vector = []
+            for symbol in SYMBOLS:
+                if symbol in symbols_data:
+                    vector.extend(symbols_data[symbol])
+                else:
+                    vector.extend([0.0] * 14)
+            result.append((t, vector))
+
+        log(f'Features range: {len(result)} timestamps from {start_date} to {end_date}')
+        return result
+
+    except Exception as e:
+        log(f'DB error in get_features_range: {e}')
+        return []
+
+
+def predict_range(start_date, end_date, horizon='15m'):
+    """Batch predict regime for a date range."""
+    if horizon not in models:
+        return {'error': f'Model not loaded for {horizon}'}
+
+    features_list = get_features_range(start_date, end_date)
+    if not features_list:
+        return {'error': 'No features available', 'predictions': []}
+
+    predictions = []
+    for timestamp, vector in features_list:
+        normalized = normalize(vector)
+        X = np.array([normalized], dtype=np.float32)
+        proba = models[horizon].predict_proba(X)[0]
+        pred = int(models[horizon].predict(X)[0])
+        regime = 'calme' if pred == 0 else 'actif'
+
+        predictions.append({
+            'timestamp': timestamp,
+            'regime': regime,
+            'proba': round(float(proba[pred]), 4),
+        })
+
+    log(f'Predicted {len(predictions)} regimes for {horizon}')
+    return {'predictions': predictions, 'horizon': horizon, 'count': len(predictions)}
+
+
 def predict(horizon):
     """Run full prediction pipeline for a given horizon."""
     if horizon not in models:
@@ -270,6 +352,13 @@ def main():
                 for h in models:
                     results[h] = predict(h)
                 print(json.dumps(results), flush=True)
+
+            elif action == 'predict_range':
+                start = cmd.get('start')
+                end = cmd.get('end')
+                horizon = cmd.get('horizon', '15m')
+                result = predict_range(start, end, horizon)
+                print(json.dumps(result), flush=True)
 
             elif action == 'ping':
                 print(json.dumps({'status': 'ok'}), flush=True)

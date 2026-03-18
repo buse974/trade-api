@@ -157,6 +157,17 @@ class Regime {
   }
 
   /**
+   * Batch predict regime for a date range (for backtesting).
+   * Returns { predictions: [{timestamp, regime, proba}], count }
+   */
+  async predictRange(start, end, horizon = '15m') {
+    if (!this.ready) {
+      return { error: 'Service not ready', predictions: [] };
+    }
+    return this._send({ action: 'predict_range', start, end, horizon }, 120000);
+  }
+
+  /**
    * Get the current cached regime (no DB query).
    */
   getRegime() {
@@ -180,7 +191,7 @@ class Regime {
   /**
    * Send command to Python process.
    */
-  _send(cmd) {
+  _send(cmd, timeoutMs = 30000) {
     return new Promise((resolve, reject) => {
       if (!this.process || !this.ready) {
         resolve({ regime: 'actif', proba: 0.5, stale: true });
@@ -196,14 +207,13 @@ class Regime {
         reject(e);
       }
 
-      // Timeout after 30s (DB query can be slow on first call)
       setTimeout(() => {
         const idx = this.pendingCallbacks.indexOf(resolve);
         if (idx !== -1) {
           this.pendingCallbacks.splice(idx, 1);
           resolve({ regime: 'actif', proba: 0.5, stale: true, error: 'timeout' });
         }
-      }, 30000);
+      }, timeoutMs);
     });
   }
 

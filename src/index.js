@@ -213,6 +213,8 @@ app.post('/api/backtest', async (req, res) => {
     stopLoss = 5,
     takeProfit = 10,
     positionSize = 100,
+    useRegime = false,   // Enable ML regime filter (blocks entries during 'calme')
+    regimeHorizon = '15m',
   } = req.body;
 
   if (!month || !/^\d{4}-\d{2}$/.test(month)) {
@@ -247,6 +249,24 @@ app.post('/api/backtest', async (req, res) => {
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'No data for this period' });
+    }
+
+    // Load regime predictions for the month if requested
+    let regimeMap = null;
+    if (useRegime) {
+      const endDateStr = new Date(y, m, 1).toISOString().slice(0, 10);
+      const rangeResult = await regime.predictRange(startDate, endDateStr, regimeHorizon);
+      if (rangeResult && rangeResult.predictions && rangeResult.predictions.length > 0) {
+        regimeMap = {};
+        for (const p of rangeResult.predictions) {
+          // Key by timestamp rounded to minute for matching
+          const t = new Date(p.timestamp).getTime();
+          regimeMap[t] = p;
+        }
+        console.log(`[backtest] Loaded ${rangeResult.predictions.length} regime predictions`);
+      } else {
+        console.log('[backtest] No regime predictions available, running without filter');
+      }
     }
 
     // Find index where the actual month starts
@@ -286,8 +306,26 @@ app.post('/api/backtest', async (req, res) => {
       const state = currentState;
       const activeProfile = p[state.profile];
 
+      // Regime lookup: find closest timestamp in regimeMap
+      let currentRegime = null;
+      if (regimeMap) {
+        // Match to nearest minute (features are per-minute)
+        const roundedTime = Math.floor(time / 60000) * 60000;
+        currentRegime = regimeMap[roundedTime] || null;
+        // Try +/- 1 minute if not exact match
+        if (!currentRegime) currentRegime = regimeMap[roundedTime - 60000] || regimeMap[roundedTime + 60000] || null;
+      }
+      const isCalme = currentRegime && currentRegime.regime === 'calme';
+
       if (position) {
-        if (!activeProfile.enabled) {
+        // Force exit if regime switches to calme
+        if (isCalme) {
+          const amount = position.qty * price;
+          const pnl = amount - (position.qty * position.entryPrice);
+          cash += amount;
+          trades.push({ type: 'SELL', price, qty: position.qty, pnl, reason: 'regime_calme', profile: state.profile, regime: 'calme', time });
+          position = null;
+        } else if (!activeProfile.enabled) {
           // Profile says sell everything
           const amount = position.qty * price;
           const pnl = amount - (position.qty * position.entryPrice);
@@ -318,13 +356,13 @@ app.post('/api/backtest', async (req, res) => {
         }
       }
 
-      // Buy if no position and profile allows it
-      if (!position && cash > 1 && activeProfile.enabled && activeProfile.positionSize > 0) {
+      // Buy if no position, profile allows it, and regime is not calme
+      if (!position && cash > 1 && activeProfile.enabled && activeProfile.positionSize > 0 && !isCalme) {
         const investAmount = cash * (activeProfile.positionSize / 100);
         const qty = investAmount / price;
         cash -= investAmount;
         position = { qty, entryPrice: price, entryTime: time };
-        trades.push({ type: 'BUY', price, qty, profile: state.profile, time });
+        trades.push({ type: 'BUY', price, qty, profile: state.profile, regime: currentRegime?.regime || 'unknown', time });
       }
 
       const totalValue = cash + (position ? position.qty * price : 0);
@@ -334,8 +372,8 @@ app.post('/api/backtest', async (req, res) => {
 
       // Sample every 60 rows (~1h)
       if (inMonth % 60 === 0) {
-        capitalHistory.push({ time: Math.floor(time / 1000), value: totalValue, profile: state.profile });
-        profileHistory.push({ time: Math.floor(time / 1000), profile: state.profile, d1: state.d1, d2: state.d2 });
+        capitalHistory.push({ time: Math.floor(time / 1000), value: totalValue, profile: state.profile, regime: currentRegime?.regime || null });
+        profileHistory.push({ time: Math.floor(time / 1000), profile: state.profile, d1: state.d1, d2: state.d2, regime: currentRegime?.regime || null });
       }
     }
 
@@ -362,6 +400,13 @@ app.post('/api/backtest', async (req, res) => {
     for (const ph of profileHistory) profileCounts[ph.profile]++;
     const totalSamples = profileHistory.length || 1;
 
+    // Regime distribution stats
+    const regimeCounts = { actif: 0, calme: 0, unknown: 0 };
+    for (const ph of profileHistory) {
+      const r = ph.regime || 'unknown';
+      regimeCounts[r] = (regimeCounts[r] || 0) + 1;
+    }
+
     res.json({
       symbol,
       month,
@@ -372,6 +417,7 @@ app.post('/api/backtest', async (req, res) => {
       trades,
       capitalHistory,
       profileHistory,
+      useRegime,
       metrics: {
         totalTrades: trades.filter(t => t.type === 'SELL').length,
         wins,
@@ -386,6 +432,11 @@ app.post('/api/backtest', async (req, res) => {
           bearish: ((profileCounts.bearish / totalSamples) * 100).toFixed(0),
           reversal: ((profileCounts.reversal / totalSamples) * 100).toFixed(0),
         },
+        regimeDistribution: useRegime ? {
+          actif: ((regimeCounts.actif / totalSamples) * 100).toFixed(0),
+          calme: ((regimeCounts.calme / totalSamples) * 100).toFixed(0),
+          unknown: ((regimeCounts.unknown / totalSamples) * 100).toFixed(0),
+        } : null,
       },
       dataPoints: result.rows.length - monthStartIdx,
     });
