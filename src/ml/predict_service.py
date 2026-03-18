@@ -261,7 +261,7 @@ def get_features_range(start_date, end_date):
 
 
 def predict_range(start_date, end_date, horizon='15m'):
-    """Batch predict regime for a date range."""
+    """Batch predict regime for a date range using vectorized inference."""
     if horizon not in models:
         return {'error': f'Model not loaded for {horizon}'}
 
@@ -269,18 +269,23 @@ def predict_range(start_date, end_date, horizon='15m'):
     if not features_list:
         return {'error': 'No features available', 'predictions': []}
 
-    predictions = []
-    for timestamp, vector in features_list:
-        normalized = normalize(vector)
-        X = np.array([normalized], dtype=np.float32)
-        proba = models[horizon].predict_proba(X)[0]
-        pred = int(models[horizon].predict(X)[0])
-        regime = 'calme' if pred == 0 else 'actif'
+    # Normalize all vectors
+    timestamps = [t for t, _ in features_list]
+    vectors = [normalize(v) for _, v in features_list]
 
+    # Batch predict (much faster than one-by-one)
+    X = np.array(vectors, dtype=np.float32)
+    probas = models[horizon].predict_proba(X)
+    preds = models[horizon].predict(X)
+
+    predictions = []
+    for i in range(len(timestamps)):
+        pred = int(preds[i])
+        regime = 'calme' if pred == 0 else 'actif'
         predictions.append({
-            'timestamp': timestamp,
+            'timestamp': timestamps[i],
             'regime': regime,
-            'proba': round(float(proba[pred]), 4),
+            'proba': round(float(probas[i][pred]), 4),
         })
 
     log(f'Predicted {len(predictions)} regimes for {horizon}')
