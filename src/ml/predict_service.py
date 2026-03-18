@@ -341,30 +341,28 @@ def main():
         try:
             cmd = json.loads(line)
             action = cmd.get('action', 'predict')
+            req_id = cmd.get('_id')
 
             if action == 'predict':
                 horizon = cmd.get('horizon', '15m')
                 result = predict(horizon)
-                print(json.dumps(result), flush=True)
-
             elif action == 'predict_all':
-                results = {}
+                result = {}
                 for h in models:
-                    results[h] = predict(h)
-                print(json.dumps(results), flush=True)
-
+                    result[h] = predict(h)
             elif action == 'predict_range':
                 start = cmd.get('start')
                 end = cmd.get('end')
                 horizon = cmd.get('horizon', '15m')
                 result = predict_range(start, end, horizon)
-                print(json.dumps(result), flush=True)
-
             elif action == 'ping':
-                print(json.dumps({'status': 'ok'}), flush=True)
-
+                result = {'status': 'ok'}
             else:
-                print(json.dumps({'error': f'Unknown action: {action}'}), flush=True)
+                result = {'error': f'Unknown action: {action}'}
+
+            if req_id is not None:
+                result['_id'] = req_id
+            print(json.dumps(result), flush=True)
 
         except json.JSONDecodeError:
             print(json.dumps({'error': 'Invalid JSON'}), flush=True)

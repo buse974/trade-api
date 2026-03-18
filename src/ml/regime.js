@@ -21,7 +21,8 @@ class Regime {
   constructor() {
     this.process = null;
     this.ready = false;
-    this.pendingCallbacks = [];
+    this.pendingCallbacks = new Map(); // id -> resolve
+    this.nextId = 1;
     this.currentRegime = { regime: 'actif', proba: 0.5, stale: true }; // default = trade normally
     this.allRegimes = {};
     this.updateInterval = null;
@@ -64,9 +65,11 @@ class Regime {
             return;
           }
 
-          // Resolve pending callback
-          if (this.pendingCallbacks.length > 0) {
-            const cb = this.pendingCallbacks.shift();
+          // Resolve pending callback by ID
+          if (data._id && this.pendingCallbacks.has(data._id)) {
+            const cb = this.pendingCallbacks.get(data._id);
+            this.pendingCallbacks.delete(data._id);
+            delete data._id;
             cb(data);
           }
         } catch (e) {
@@ -198,19 +201,19 @@ class Regime {
         return;
       }
 
-      this.pendingCallbacks.push(resolve);
+      const id = this.nextId++;
+      this.pendingCallbacks.set(id, resolve);
 
       try {
-        this.process.stdin.write(JSON.stringify(cmd) + '\n');
+        this.process.stdin.write(JSON.stringify({ ...cmd, _id: id }) + '\n');
       } catch (e) {
-        this.pendingCallbacks.pop();
+        this.pendingCallbacks.delete(id);
         reject(e);
       }
 
       setTimeout(() => {
-        const idx = this.pendingCallbacks.indexOf(resolve);
-        if (idx !== -1) {
-          this.pendingCallbacks.splice(idx, 1);
+        if (this.pendingCallbacks.has(id)) {
+          this.pendingCallbacks.delete(id);
           resolve({ regime: 'actif', proba: 0.5, stale: true, error: 'timeout' });
         }
       }, timeoutMs);
